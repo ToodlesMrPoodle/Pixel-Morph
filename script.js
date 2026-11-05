@@ -342,7 +342,7 @@ window.addEventListener("DOMContentLoaded", () => {
         if (p.progress > 1) p.progress = 1;
         done = false;
 
-        // Smoothstep easing for immediate and graceful movement
+        const t = p.progress;
         const ease = t * t * (3 - 2 * t);
 
         const dirX = p.tx - p.startX;
