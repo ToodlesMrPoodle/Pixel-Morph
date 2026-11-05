@@ -6,26 +6,51 @@ window.addEventListener("DOMContentLoaded", () => {
 
   const img1Input = document.getElementById("img1");
   const img2Input = document.getElementById("img2");
+  const dropZone1 = document.getElementById("dropZone1");
+  const dropZone2 = document.getElementById("dropZone2");
+  const preview1 = document.getElementById("preview1");
+  const preview2 = document.getElementById("preview2");
+  const prompt1 = document.getElementById("prompt1");
+  const prompt2 = document.getElementById("prompt2");
+
+  const speedSlider = document.getElementById("speedSlider");
+  const speedVal = document.getElementById("speedVal");
   const morphBtn = document.getElementById("morphBtn");
 
-  // clear file inputs on load so filenames don't persist after refresh
+  const explorerModal = document.getElementById("explorerModal");
+  const modalCloseBtn = document.getElementById("modalCloseBtn");
+  const explorerList = document.getElementById("explorerList");
+  const fileCountText = document.getElementById("fileCountText");
+  const importPresetBtn = document.getElementById("importPresetBtn");
+  const presetImportInput = document.getElementById("presetImportInput");
+
+  let activeSlot = null;
+  const presetItems = Array.isArray(window.PRESET_FILES) ? [...window.PRESET_FILES] : [];
+
   img1Input.value = "";
   img2Input.value = "";
 
+  let speedMultiplier = 0.2;
+  speedSlider.addEventListener("input", e => {
+    speedMultiplier = parseFloat(e.target.value);
+    speedVal.textContent = speedMultiplier.toFixed(1) + "x";
+  });
+
   let pixelsA = null;
   let pixelsB = null;
-  let sourcePixels = []; // {x, y, origX, origY, color} for animation
-  let targetPositions = []; // {x, y, color} destination coordinates
+  let sourcePixels = [];
+  let targetPositions = [];
   let animating = false;
 
-  // make loadImage return a Promise so startMorph can await missing files
+  const frameBuffer = ctx.createImageData(W, H);
+  const bufferData = frameBuffer.data;
+
   function loadImage(file) {
     return new Promise((resolve, reject) => {
       if (!file) return resolve(null);
       const reader = new FileReader();
       reader.onload = e => {
         const img = new Image();
-        img.crossOrigin = "anonymous";
         img.onload = () => {
           const temp = document.createElement("canvas");
           temp.width = W;
@@ -33,7 +58,8 @@ window.addEventListener("DOMContentLoaded", () => {
           const tctx = temp.getContext("2d");
           tctx.drawImage(img, 0, 0, W, H);
           const data = tctx.getImageData(0, 0, W, H).data;
-          resolve(data);
+          const dataUrl = temp.toDataURL();
+          resolve({ data, dataUrl });
         };
         img.onerror = () => reject(new Error("Failed to load image"));
         img.src = e.target.result;
@@ -43,37 +69,22 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // compute hue, saturation, lightness for sorting
-  function colorKey(color) {
-    const r = color[0] / 255;
-    const g = color[1] / 255;
-    const b = color[2] / 255;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const l = (max + min) / 2;
-    let s = 0;
-    if (max !== min) {
-      const d = max - min;
-      s = d / (1 - Math.abs(2 * l - 1));
-    }
-    let h = 0;
-    if (max !== min) {
-      const d = max - min;
-      if (max === r) h = ((g - b) / d) % 6;
-      else if (max === g) h = (b - r) / d + 2;
-      else h = (r - g) / d + 4;
-      h = h * 60;
-      if (h < 0) h += 360;
-    }
-    return { h, s, l };
-  }
-
-  function compareByColor(a, b) {
-    const ka = a._ck || (a._ck = colorKey(a.color));
-    const kb = b._ck || (b._ck = colorKey(b.color));
-    if (ka.h !== kb.h) return ka.h - kb.h;
-    if (ka.s !== kb.s) return ka.s - kb.s;
-    return ka.l - kb.l;
+  function loadImageFromSrc(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const temp = document.createElement("canvas");
+        temp.width = W;
+        temp.height = H;
+        const tctx = temp.getContext("2d");
+        tctx.drawImage(img, 0, 0, W, H);
+        const data = tctx.getImageData(0, 0, W, H).data;
+        const dataUrl = temp.toDataURL();
+        resolve({ data, dataUrl });
+      };
+      img.onerror = () => reject(new Error("Failed to load preset image"));
+      img.src = src;
+    });
   }
 
   function createPixelsArray(imgData, storeOrig = false) {
@@ -85,9 +96,10 @@ window.addEventListener("DOMContentLoaded", () => {
         const g = imgData[idx + 1];
         const b = imgData[idx + 2];
         const a = imgData[idx + 3];
-        // keep only visible pixels
+
         if (a > 0) {
-          const p = { x, y, color: [r, g, b, a] };
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+          const p = { x, y, color: [r, g, b, a], lum };
           if (storeOrig) {
             p.origX = x;
             p.origY = y;
@@ -99,100 +111,272 @@ window.addEventListener("DOMContentLoaded", () => {
     return arr;
   }
 
-  img1Input.addEventListener("change", async e => {
-    const data = await loadImage(e.target.files[0]);
+  function setupDropZone(dropZone, fileInput, previewImg, promptText, onFileReady) {
+    ["dragenter", "dragover"].forEach(name => {
+      dropZone.addEventListener(name, e => {
+        e.preventDefault();
+        dropZone.classList.add("dragover");
+      });
+    });
+
+    ["dragleave", "drop"].forEach(name => {
+      dropZone.addEventListener(name, e => {
+        e.preventDefault();
+        dropZone.classList.remove("dragover");
+      });
+    });
+
+    dropZone.addEventListener("drop", async e => {
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        const file = e.dataTransfer.files[0];
+        fileInput.files = e.dataTransfer.files;
+        await processFile(file);
+      }
+    });
+
+    fileInput.addEventListener("click", () => {
+      fileInput.value = "";
+    });
+
+    fileInput.addEventListener("change", async e => {
+      if (e.target.files && e.target.files.length) {
+        await processFile(e.target.files[0]);
+      }
+    });
+
+    async function processFile(file) {
+      const res = await loadImage(file);
+      if (!res) return;
+      previewImg.src = res.dataUrl;
+      previewImg.classList.add("active");
+      promptText.style.display = "none";
+      await onFileReady(res.data);
+    }
+  }
+
+  setupDropZone(dropZone1, img1Input, preview1, prompt1, async data => {
     pixelsA = data;
     sourcePixels = createPixelsArray(pixelsA, true);
   });
 
-  img2Input.addEventListener("change", async e => {
-    const data = await loadImage(e.target.files[0]);
+  setupDropZone(dropZone2, img2Input, preview2, prompt2, async data => {
     pixelsB = data;
     targetPositions = createPixelsArray(pixelsB, false);
   });
 
-  // startMorph now checks for input files even if filenames are visible but data not loaded
+  function populateExplorer() {
+    explorerList.innerHTML = "";
+    fileCountText.textContent = `${presetItems.length} items`;
+
+    presetItems.forEach(file => {
+      const item = document.createElement("div");
+      item.className = "explorer-item";
+
+      const thumb = document.createElement("img");
+      thumb.className = "explorer-thumb";
+      thumb.src = file.dataUrl || file.path;
+      thumb.alt = file.name;
+
+      const label = document.createElement("span");
+      label.className = "explorer-name";
+      label.textContent = file.name;
+
+      item.appendChild(thumb);
+      item.appendChild(label);
+
+      item.addEventListener("click", async () => {
+        try {
+          const res = await loadImageFromSrc(file.dataUrl || file.path);
+          if (activeSlot === "1") {
+            pixelsA = res.data;
+            preview1.src = res.dataUrl;
+            preview1.classList.add("active");
+            prompt1.style.display = "none";
+            sourcePixels = createPixelsArray(pixelsA, true);
+          } else if (activeSlot === "2") {
+            pixelsB = res.data;
+            preview2.src = res.dataUrl;
+            preview2.classList.add("active");
+            prompt2.style.display = "none";
+            targetPositions = createPixelsArray(pixelsB, false);
+          }
+          closeModal();
+        } catch (err) {
+          console.error(err);
+        }
+      });
+
+      explorerList.appendChild(item);
+    });
+  }
+
+  populateExplorer();
+
+  document.querySelectorAll(".preset-trigger-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      activeSlot = btn.getAttribute("data-slot");
+      explorerModal.classList.remove("hidden");
+    });
+  });
+
+  function closeModal() {
+    explorerModal.classList.add("hidden");
+    activeSlot = null;
+  }
+
+  modalCloseBtn.addEventListener("click", closeModal);
+
+  explorerModal.addEventListener("click", e => {
+    if (e.target === explorerModal) closeModal();
+  });
+
+  window.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !explorerModal.classList.contains("hidden")) {
+      closeModal();
+    }
+  });
+
+  importPresetBtn.addEventListener("click", () => {
+    presetImportInput.click();
+  });
+
+  presetImportInput.addEventListener("change", e => {
+    const files = Array.from(e.target.files);
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        presetItems.push({
+          name: file.name,
+          dataUrl: ev.target.result,
+        });
+        populateExplorer();
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+
   async function startMorph() {
-    // if file inputs contain files but arrays are missing, load them
     const promises = [];
     if (img1Input.files.length && !sourcePixels.length) {
-      promises.push(loadImage(img1Input.files[0]).then(data => {
-        pixelsA = data;
+      promises.push(loadImage(img1Input.files[0]).then(res => {
+        pixelsA = res.data;
+        preview1.src = res.dataUrl;
+        preview1.classList.add("active");
+        prompt1.style.display = "none";
         sourcePixels = createPixelsArray(pixelsA, true);
       }));
     }
     if (img2Input.files.length && !targetPositions.length) {
-      promises.push(loadImage(img2Input.files[0]).then(data => {
-        pixelsB = data;
+      promises.push(loadImage(img2Input.files[0]).then(res => {
+        pixelsB = res.data;
+        preview2.src = res.dataUrl;
+        preview2.classList.add("active");
+        prompt2.style.display = "none";
         targetPositions = createPixelsArray(pixelsB, false);
       }));
     }
     if (promises.length) await Promise.all(promises);
 
     if (!sourcePixels.length || !targetPositions.length) {
-      alert("Please select both images (re-upload if the filename is shown but the image isn't loaded).");
+      alert("Please select both images or choose a preset.");
       return;
     }
 
-    ctx.clearRect(0, 0, W, H); // Clears the canvas
-
-    // Reset source pixels to their original positions
-    for (const p of sourcePixels) {
+    bufferData.fill(0);
+    for (let i = 0; i < sourcePixels.length; i++) {
+      const p = sourcePixels[i];
       if (p.origX !== undefined) p.x = p.origX;
       if (p.origY !== undefined) p.y = p.origY;
-      p.tx = undefined;
-      p.ty = undefined;
-      // clear cached colorKey
-      delete p._ck;
+      const px = (p.x + 0.5) | 0;
+      const py = (p.y + 0.5) | 0;
+      if (px >= 0 && px < W && py >= 0 && py < H) {
+        const idx = (py * W + px) * 4;
+        const color = p.color;
+        bufferData[idx] = color[0];
+        bufferData[idx + 1] = color[1];
+        bufferData[idx + 2] = color[2];
+        bufferData[idx + 3] = color[3];
+      }
     }
-    for (const t of targetPositions) delete t._ck;
+    ctx.putImageData(frameBuffer, 0, 0);
 
-    // Sort source and target by color (hue, saturation, lightness)
-    sourcePixels.sort(compareByColor);
-    targetPositions.sort(compareByColor);
+    sourcePixels.sort((a, b) => a.lum - b.lum);
+    targetPositions.sort((a, b) => a.lum - b.lum);
 
-    // Match by index
-    const N = Math.min(sourcePixels.length, targetPositions.length);
-    for (let i = 0; i < N; i++) {
-      sourcePixels[i].tx = targetPositions[i].x;
-      sourcePixels[i].ty = targetPositions[i].y;
+    const numTargets = targetPositions.length;
+    for (let i = 0; i < sourcePixels.length; i++) {
+      const p = sourcePixels[i];
+      const targetIdx = Math.min(numTargets - 1, Math.floor((i / sourcePixels.length) * numTargets));
+
+      p.tx = targetPositions[targetIdx].x;
+      p.ty = targetPositions[targetIdx].y;
+      p.startX = p.x;
+      p.startY = p.y;
+      p.progress = 0;
+      p.speed = (0.006 + Math.random() * 0.005) * speedMultiplier;
+      p.curve = (Math.random() - 0.5) * 35;
     }
 
-    animating = true;
-    animateMorph();
+    morphBtn.disabled = true;
+    morphBtn.textContent = "Starting...";
+
+    setTimeout(() => {
+      animating = true;
+      morphBtn.textContent = "Start Morph";
+      morphBtn.disabled = false;
+      animateMorph();
+    }, 1000);
   }
 
   function animateMorph() {
     if (!animating) return;
 
-    ctx.clearRect(0, 0, W, H);
+    bufferData.fill(0);
     let done = true;
 
-    for (const p of sourcePixels) {
-      if (p.tx === undefined) {
-        // draw remaining pixels at their original spots
-        const [r, g, b, a] = p.color;
-        ctx.fillStyle = `rgba(${r},${g},${b},${a/255})`;
-        ctx.fillRect(Math.round(p.x), Math.round(p.y), 1, 1);
-        continue;
+    for (let i = 0; i < sourcePixels.length; i++) {
+      const p = sourcePixels[i];
+
+      if (p.progress < 1) {
+        p.progress += p.speed;
+        if (p.progress > 1) p.progress = 1;
+        done = false;
+
+        const t = p.progress;
+        const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+        const dirX = p.tx - p.startX;
+        const dirY = p.ty - p.startY;
+        const dist = Math.hypot(dirX, dirY) || 1;
+        const arc = Math.sin(t * Math.PI) * p.curve;
+
+        p.x = p.startX + dirX * ease + (-dirY / dist) * arc;
+        p.y = p.startY + dirY * ease + (dirX / dist) * arc;
+      } else {
+        p.x = p.tx;
+        p.y = p.ty;
       }
 
-      // Move pixel toward target
-      const dx = p.tx - p.x;
-      const dy = p.ty - p.y;
-      const step = 0.15; // speed of motion
-      if (Math.abs(dx) > 0.2 || Math.abs(dy) > 0.2) done = false;
+      const px = (p.x + 0.5) | 0;
+      const py = (p.y + 0.5) | 0;
 
-      p.x += dx * step;
-      p.y += dy * step;
-
-      const [r, g, b, a] = p.color;
-      ctx.fillStyle = `rgba(${r},${g},${b},${a/255})`;
-      ctx.fillRect(Math.round(p.x), Math.round(p.y), 1, 1);
+      if (px >= 0 && px < W && py >= 0 && py < H) {
+        const idx = (py * W + px) * 4;
+        const color = p.color;
+        bufferData[idx] = color[0];
+        bufferData[idx + 1] = color[1];
+        bufferData[idx + 2] = color[2];
+        bufferData[idx + 3] = color[3];
+      }
     }
 
-    if (!done) requestAnimationFrame(animateMorph);
-    else animating = false;
+    ctx.putImageData(frameBuffer, 0, 0);
+
+    if (!done) {
+      requestAnimationFrame(animateMorph);
+    } else {
+      animating = false;
+    }
   }
 
   morphBtn.addEventListener("click", () => {
