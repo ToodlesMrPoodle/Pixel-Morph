@@ -30,7 +30,7 @@ window.addEventListener("DOMContentLoaded", () => {
   img1Input.value = "";
   img2Input.value = "";
 
-  let speedMultiplier = 0.2;
+  let speedMultiplier = 1.0;
   speedSlider.addEventListener("input", e => {
     speedMultiplier = parseFloat(e.target.value);
     speedVal.textContent = speedMultiplier.toFixed(1) + "x";
@@ -313,7 +313,7 @@ window.addEventListener("DOMContentLoaded", () => {
       p.startX = p.x;
       p.startY = p.y;
       p.progress = 0;
-      p.speed = (0.006 + Math.random() * 0.005) * speedMultiplier;
+      p.speed = (0.008 + Math.random() * 0.006) * speedMultiplier;
       p.curve = (Math.random() - 0.5) * 35;
     }
 
@@ -342,8 +342,8 @@ window.addEventListener("DOMContentLoaded", () => {
         if (p.progress > 1) p.progress = 1;
         done = false;
 
-        const t = p.progress;
-        const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        // Smoothstep easing for immediate and graceful movement
+        const ease = t * t * (3 - 2 * t);
 
         const dirX = p.tx - p.startX;
         const dirY = p.ty - p.startY;
